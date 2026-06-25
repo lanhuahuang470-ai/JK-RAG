@@ -1,0 +1,17 @@
+.env
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+data/vectorstore/
+data/*.pdf
+data/*.docx
+data/uploads/*.pdf
+data/uploads/*.docx
+*.log
+.pytest_cache/
+.DS_Store
+rag-ui/frontend/node_modules/
+rag-ui/frontend/dist/
+.git.broken-empty/
