@@ -18,4 +18,8 @@ numpy==2.2.6
 requests==2.32.3
 aiofiles==24.1.0
 httpx==0.28.1
-# tavily-python==0.5.1  # 仅当 WEB_SEARCH_PROVIDER=tavily 时需要
+
+# 混合检索与精排
+rank_bm25==0.2.2
+jieba==0.42.1
+dashscope==1.22.2

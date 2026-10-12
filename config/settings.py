@@ -45,6 +45,36 @@ class Settings(BaseSettings):
         default=2048,
         alias="LLM_MAX_TOKENS",
     )
+    # LLM 请求超时时间（秒）
+    llm_timeout: float = Field(
+        default=60.0,
+        alias="LLM_TIMEOUT",
+    )
+    # LLM 最大重试次数（网络失败时自动重试）
+    llm_max_retries: int = Field(
+        default=2,
+        alias="LLM_MAX_RETRIES",
+    )
+    # Embedding 请求超时时间（秒）
+    embedding_timeout: float = Field(
+        default=30.0,
+        alias="EMBEDDING_TIMEOUT",
+    )
+    # Embedding 最大重试次数
+    embedding_max_retries: int = Field(
+        default=2,
+        alias="EMBEDDING_MAX_RETRIES",
+    )
+    # 是否启用查询嵌入缓存（相同问题直接返回缓存，节省 API 调用）
+    enable_embedding_cache: bool = Field(
+        default=True,
+        alias="ENABLE_EMBEDDING_CACHE",
+    )
+    # 是否启用检索结果缓存（相同查询直接返回缓存的检索结果）
+    enable_retrieval_cache: bool = Field(
+        default=True,
+        alias="ENABLE_RETRIEVAL_CACHE",
+    )
 
     # ── 文档切分 ───────────────────────────────────────────────────────────────
     chunk_size: int = Field(
@@ -86,26 +116,25 @@ class Settings(BaseSettings):
         default=False,
         alias="ENABLE_QUERY_REWRITE",
     )
-
-    # ── Agent：RAG + 网络兜底 ────────────────────────────────────────────────
-    # 搜索引擎提供方：bocha（博查，国内直连）/ tavily（需代理）
-    web_search_provider: str = Field(default="bocha", alias="WEB_SEARCH_PROVIDER")
-    # Tavily 搜索 API Key
-    tavily_api_key: str = Field(default="", alias="TAVILY_API_KEY")
-    # 博查 Bocha 搜索 API Key
-    bocha_api_key: str = Field(default="", alias="BOCHA_API_KEY")
-    # 是否启用网络兜底（RAG 不足时转网络搜索）
-    enable_web_fallback: bool = Field(default=False, alias="ENABLE_WEB_FALLBACK")
-    # 高置信度阈值：≥ 此值直接用 RAG
-    fallback_high_threshold: float = Field(
-        default=0.65, alias="FALLBACK_HIGH_THRESHOLD"
+    # 混合检索：向量 + BM25 关键词召回，RRF 融合（补齐条款编号类精确查询的短板）
+    enable_hybrid_retrieval: bool = Field(
+        default=True,
+        alias="ENABLE_HYBRID_RETRIEVAL",
     )
-    # 低置信度阈值：≤ 此值直接转网络
-    fallback_low_threshold: float = Field(
-        default=0.45, alias="FALLBACK_LOW_THRESHOLD"
+    # 召回阶段数量（RRF 融合 / Rerank 精排前）
+    retrieval_fetch_k: int = Field(
+        default=20,
+        alias="RETRIEVAL_FETCH_K",
     )
-    # 网络搜索返回结果数
-    web_search_max_results: int = Field(default=5, alias="WEB_SEARCH_MAX_RESULTS")
+    # Rerank 精排：cross-encoder 对召回候选二次排序（只排小集合，换取精度）
+    enable_rerank: bool = Field(
+        default=True,
+        alias="ENABLE_RERANK",
+    )
+    rerank_model: str = Field(
+        default="gte-rerank-v2",
+        alias="RERANK_MODEL",
+    )
 
     # ── 日志 ───────────────────────────────────────────────────────────────────
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
@@ -113,6 +142,8 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         populate_by_name = True
+        # 忽略 .env 中未声明的冗余键，避免旧配置残留导致启动失败
+        extra = "ignore"
 
     @property
     def faiss_index_dir(self) -> Path:

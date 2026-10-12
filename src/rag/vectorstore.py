@@ -1,10 +1,16 @@
 """
 FAISS 向量库管理模块
 封装索引的创建、持久化、加载、增量更新和相似度检索
+
+性能优化：
+- 增量添加时延迟持久化（避免频繁磁盘 IO）
+- 提供 flush 方法手动触发持久化
+- 索引加载后常驻内存，避免重复加载
 """
 from __future__ import annotations
 
 import shutil
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -12,10 +18,13 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 
 from config.settings import settings
-from src.embeddings import DashScopeEmbeddings
+from src.rag.embeddings import DashScopeEmbeddings
 from src.utils import get_logger
 
 logger = get_logger(__name__)
+
+# 自动持久化的最小间隔（秒），避免频繁写磁盘
+_AUTO_PERSIST_INTERVAL = 30  # 30 秒
 
 
 class FAISSVectorStore:
@@ -37,12 +46,12 @@ class FAISSVectorStore:
         self.embeddings = embeddings or DashScopeEmbeddings()
         self.index_path = Path(index_path)
         self._store: Optional[FAISS] = None
+        self._last_persist_time: float = 0.0
+        self._dirty: bool = False  # 是否有未持久化的变更
 
         logger.info(f"FAISSVectorStore 初始化 | index_path={self.index_path}")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # 索引构建 & 更新
-    # ──────────────────────────────────────────────────────────────────────────
+    # ── 索引构建 & 更新 ────────────────────────────────────────────────────
 
     def build_index(self, documents: List[Document]) -> None:
         """
@@ -59,12 +68,15 @@ class FAISSVectorStore:
             documents=documents,
             embedding=self.embeddings,
         )
-        self._persist()
+        self._persist(force=True)
         logger.info("FAISS 索引构建完成并已持久化")
 
     def add_documents(self, documents: List[Document]) -> None:
         """
         增量添加文档到现有索引（索引不存在则自动创建）
+
+        注意：增量添加使用延迟持久化，避免频繁磁盘 IO。
+        如需立即持久化，请调用 flush()。
 
         Args:
             documents: 新增文档列表
@@ -84,20 +96,38 @@ class FAISSVectorStore:
 
         logger.info(f"增量添加文档 | 新增 chunk 数={len(documents)}")
         self._store.add_documents(documents)
-        self._persist()
-        logger.info("增量更新完成并已持久化")
+        self._dirty = True
+        self._persist(force=False)  # 延迟持久化
+        logger.info("增量添加完成（已延迟持久化）")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # 持久化 & 加载
-    # ──────────────────────────────────────────────────────────────────────────
+    # ── 持久化 & 加载 ──────────────────────────────────────────────────────
 
-    def _persist(self) -> None:
-        """将内存中的索引持久化到磁盘"""
+    def _persist(self, force: bool = False) -> None:
+        """
+        将内存中的索引持久化到磁盘
+
+        Args:
+            force: 是否强制持久化。False 时按间隔节流，避免频繁 IO。
+        """
         if self._store is None:
             raise RuntimeError("没有可持久化的索引。")
+        if not self._dirty:
+            return
+        if not force:
+            now = time.time()
+            if now - self._last_persist_time < _AUTO_PERSIST_INTERVAL:
+                return  # 未到间隔，跳过持久化
         self.index_path.mkdir(parents=True, exist_ok=True)
         self._store.save_local(str(self.index_path))
+        self._last_persist_time = time.time()
+        self._dirty = False
         logger.debug(f"索引已保存至 {self.index_path}")
+
+    def flush(self) -> None:
+        """强制将所有未持久化的变更写入磁盘"""
+        if self._dirty and self._store is not None:
+            self._persist(force=True)
+            logger.info("索引已强制持久化到磁盘")
 
     def load_index(self) -> bool:
         """
@@ -130,9 +160,7 @@ class FAISSVectorStore:
             shutil.rmtree(self.index_path)
             logger.warning(f"索引已清空：{self.index_path}")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # 检索
-    # ──────────────────────────────────────────────────────────────────────────
+    # ── 检索 ───────────────────────────────────────────────────────────────
 
     def similarity_search(
         self,
@@ -209,9 +237,7 @@ class FAISSVectorStore:
             search_kwargs={"k": k},
         )
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # 工具方法
-    # ──────────────────────────────────────────────────────────────────────────
+    # ── 工具方法 ───────────────────────────────────────────────────────────
 
     def _ensure_loaded(self) -> None:
         """确保索引已加载，否则尝试从磁盘加载"""

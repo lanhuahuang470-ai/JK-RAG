@@ -17,30 +17,25 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from config.settings import settings
-from src.chain import RAGChain
-from src.agent import FallbackAgent
-from src.agent.tools.rag_tool import RAGTool
-from src.document_processor import DocumentProcessor
-from src.embeddings import DashScopeEmbeddings
 from src.llm import QwenLLM
+from src.api.conversation import ChatMessage, conversation_manager
+from src.rag import RAGChain, DashScopeEmbeddings, DocumentProcessor, FAISSVectorStore
 from src.utils import get_logger
-from src.vectorstore import FAISSVectorStore
 
 logger = get_logger(__name__)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# FastAPI 应用初始化
-# ──────────────────────────────────────────────────────────────────────────────
+# ── FastAPI 应用初始化 ──────────────────────────────────────────────────
 
 app = FastAPI(
     title="企业级 RAG 知识库问答系统",
     description=(
-        "基于 LangChain + FAISS + Qwen3-Embedding + Qwen-Max 的企业级 RAG 系统\n\n"
+        f"基于 LangChain + FAISS + {settings.embedding_model} + {settings.llm_model} 的企业级 RAG 系统\n\n"
         "**技术栈**\n"
         "- 向量检索：FAISS\n"
-        "- 嵌入模型：Qwen3-Embedding（text-embedding-v4）\n"
-        "- 大语言模型：qwen-max（stuff 问答链）\n"
-        "- 文档处理：PyPDF2 + python-docx，chunk_size=1000, overlap=200"
+        f"- 嵌入模型：{settings.embedding_model}\n"
+        f"- 大语言模型：{settings.llm_model}（stuff 问答链）\n"
+        "- 文档处理：层次切分（PyPDF2 + python-docx）\n"
+        "- 多轮对话：查询改写 + 会话管理"
     ),
     version="1.0.0",
     docs_url="/docs",
@@ -55,9 +50,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 全局组件（延迟初始化）
-# ──────────────────────────────────────────────────────────────────────────────
+# ── 全局组件（延迟初始化）──────────────────────────────────────────────
 
 _components: Dict[str, Any] = {}
 
@@ -75,10 +68,6 @@ def get_components() -> Dict[str, Any]:
 
         llm = QwenLLM()
         rag_chain = RAGChain(vector_store=vector_store, llm=llm)
-        agent = FallbackAgent(
-            rag_tool=RAGTool(rag_chain=rag_chain),
-            llm=llm,
-        )
         doc_processor = DocumentProcessor()
 
         _components.update(
@@ -87,7 +76,6 @@ def get_components() -> Dict[str, Any]:
                 "vector_store": vector_store,
                 "llm": llm,
                 "rag_chain": rag_chain,
-                "agent": agent,
                 "doc_processor": doc_processor,
             }
         )
@@ -95,9 +83,7 @@ def get_components() -> Dict[str, Any]:
     return _components
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Pydantic 模型
-# ──────────────────────────────────────────────────────────────────────────────
+# ── Pydantic 模型 ──────────────────────────────────────────────────────
 
 
 class QueryRequest(BaseModel):
@@ -108,17 +94,64 @@ class QueryRequest(BaseModel):
         le=20,
         description="检索 Top-K 数量，默认使用系统配置",
     )
+    conversation_id: Optional[str] = Field(
+        default=None,
+        description="会话 ID，传入则使用该会话的历史上下文进行多轮对话",
+    )
+
+
+class ConversationQueryRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=2000, description="用户问题")
+    top_k: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=20,
+        description="检索 Top-K 数量，默认使用系统配置",
+    )
+
+
+class ConversationCreateResponse(BaseModel):
+    id: str
+    title: str
+    created_at: float
+
+
+class ConversationItem(BaseModel):
+    id: str
+    title: str
+    created_at: float
+    updated_at: float
+    message_count: int
+
+
+class MessageItem(BaseModel):
+    role: str
+    content: str
+    sources: List[str]
+    source_type: Optional[str]
+    route: Optional[str]
+    timestamp: float
+
+
+class ConversationDetailResponse(BaseModel):
+    id: str
+    title: str
+    created_at: float
+    updated_at: float
+    messages: List[MessageItem]
 
 
 class QueryResponse(BaseModel):
     question: str
     answer: str
+    contexts: List[str]
     sources: List[str]
     retrieval_confidence: float
     source_scores: Dict[str, float]
     source_type: str
     route: str
     elapsed_ms: float
+    timings_ms: Dict[str, float]
 
 
 class DocumentUploadResponse(BaseModel):
@@ -143,9 +176,7 @@ class HealthResponse(BaseModel):
     version: str
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# API 路由
-# ──────────────────────────────────────────────────────────────────────────────
+# ── API 路由 ───────────────────────────────────────────────────────────
 
 
 @app.get("/", summary="服务根路径")
@@ -220,6 +251,11 @@ async def upload_document(file: UploadFile = File(...)) -> DocumentUploadRespons
 
         # 写入 FAISS 索引（增量）
         comps["vector_store"].add_documents(docs)
+        # 上传完成后强制持久化，确保数据不丢
+        comps["vector_store"].flush()
+        # 清空检索缓存（索引已更新）
+        from src.rag.rag_chain import clear_retrieval_cache
+        clear_retrieval_cache()
         # 重建 RAG 链（确保 retriever 指向最新索引）
         comps["rag_chain"]._chain = None
 
@@ -238,9 +274,10 @@ async def upload_document(file: UploadFile = File(...)) -> DocumentUploadRespons
 @app.post("/query", response_model=QueryResponse, summary="知识库问答")
 async def query(request: QueryRequest) -> QueryResponse:
     """
-    通过已配置的 Agent 执行问答。
+    执行 RAG 知识库问答。
 
-    流程：本地 RAG → 置信度判断 → 必要时网络搜索兜底。
+    流程：查询改写（多轮时）→ FAISS 检索 → Stuff 拼接上下文 → LLM 生成。
+    传入 conversation_id 则使用该会话的历史上下文进行多轮对话。
     """
     comps = get_components()
 
@@ -254,14 +291,24 @@ async def query(request: QueryRequest) -> QueryResponse:
 
     # 如果请求指定了 top_k，临时调整
     chain = comps["rag_chain"]
-    agent = comps["agent"]
     original_k = chain.top_k
     if request.top_k is not None:
         chain.top_k = request.top_k
         chain._chain = None  # 重建 retriever
 
+    # 获取历史消息（如果有会话 ID）
+    chat_history = None
+    if request.conversation_id:
+        conv = conversation_manager.get(request.conversation_id)
+        if conv is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"会话 {request.conversation_id} 不存在",
+            )
+        chat_history = [m.to_dict() for m in conv.messages]
+
     try:
-        result = agent.query(request.question)
+        result = chain.query(request.question, chat_history=chat_history)
     except Exception as e:
         logger.error(f"问答失败：{e}")
         raise HTTPException(
@@ -275,15 +322,118 @@ async def query(request: QueryRequest) -> QueryResponse:
 
     elapsed = (time.time() - t0) * 1000
 
+    # 如果有会话 ID，把消息追加到会话中
+    if request.conversation_id:
+        conv = conversation_manager.get(request.conversation_id)
+        if conv is not None:
+            conv.add_message(ChatMessage(role="user", content=request.question))
+            conv.add_message(
+                ChatMessage(
+                    role="assistant",
+                    content=result["answer"],
+                    sources=result["sources"],
+                    source_type="知识库",
+                    route="RAG",
+                )
+            )
+
     return QueryResponse(
         question=request.question,
         answer=result["answer"],
+        contexts=[doc.page_content for doc in result.get("source_documents", [])],
         sources=result["sources"],
-        retrieval_confidence=result.get("confidence", 0.0),
+        retrieval_confidence=result.get("retrieval_confidence", 0.0),
         source_scores=result.get("source_scores", {}),
-        source_type=result.get("source_type", "知识库"),
-        route=result.get("route", "Agent"),
+        source_type="知识库",
+        route="RAG",
         elapsed_ms=round(elapsed, 2),
+        timings_ms=result.get("timings_ms", {}),
+    )
+
+
+# ── 会话管理 API ────────────────────────────────────────────────────────
+
+
+@app.post(
+    "/conversations",
+    response_model=ConversationCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="创建新会话",
+)
+async def create_conversation() -> ConversationCreateResponse:
+    """创建一个新的多轮对话会话"""
+    conv = conversation_manager.create()
+    logger.info(f"创建新会话：{conv.id}")
+    return ConversationCreateResponse(
+        id=conv.id,
+        title=conv.title,
+        created_at=conv.created_at,
+    )
+
+
+@app.get(
+    "/conversations",
+    response_model=List[ConversationItem],
+    summary="获取会话列表",
+)
+async def list_conversations() -> List[ConversationItem]:
+    """获取所有会话列表，按更新时间倒序"""
+    convs = conversation_manager.list()
+    return [ConversationItem(**c) for c in convs]
+
+
+@app.get(
+    "/conversations/{conv_id}",
+    response_model=ConversationDetailResponse,
+    summary="获取会话详情",
+)
+async def get_conversation(conv_id: str) -> ConversationDetailResponse:
+    """获取指定会话的详情（含历史消息）"""
+    conv = conversation_manager.get(conv_id)
+    if conv is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"会话 {conv_id} 不存在",
+        )
+    data = conv.to_dict(with_messages=True)
+    return ConversationDetailResponse(**data)
+
+
+@app.post(
+    "/conversations/{conv_id}/messages",
+    response_model=QueryResponse,
+    summary="在指定会话中发送消息",
+)
+async def send_message(conv_id: str, request: ConversationQueryRequest) -> QueryResponse:
+    """
+    在指定会话中发送消息，自动带上历史上下文。
+    会话不存在时返回 404。
+    """
+    # 复用 query 接口的逻辑，直接用 conversation_id
+    full_request = QueryRequest(
+        question=request.question,
+        top_k=request.top_k,
+        conversation_id=conv_id,
+    )
+    return await query(full_request)
+
+
+@app.delete(
+    "/conversations/{conv_id}",
+    summary="删除会话",
+)
+async def delete_conversation(conv_id: str) -> JSONResponse:
+    """删除指定会话"""
+    ok = conversation_manager.delete(conv_id)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"会话 {conv_id} 不存在",
+        )
+    logger.info(f"删除会话：{conv_id}")
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"message": f"会话 {conv_id} 已删除"},
     )
 
 
@@ -307,6 +457,9 @@ async def reset_index() -> JSONResponse:
     comps = get_components()
     comps["vector_store"].reset_index()
     comps["rag_chain"]._chain = None
+    # 清空检索缓存
+    from src.rag.rag_chain import clear_retrieval_cache
+    clear_retrieval_cache()
     logger.warning("索引已被 API 重置")
     return JSONResponse(
         status_code=status.HTTP_200_OK,
@@ -314,9 +467,7 @@ async def reset_index() -> JSONResponse:
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 入口
-# ──────────────────────────────────────────────────────────────────────────────
+# ── 入口 ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     uvicorn.run(

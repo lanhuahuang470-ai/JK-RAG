@@ -4,8 +4,21 @@ const API_BASE = "/api";
 
 function formatSource(src) {
   if (!src) return null;
+  // 后端返回格式："文件名.pdf · 第一章 > 第三条"
+  // 去掉路径前缀，保留条款路径
   const name = src.split("/").pop() || src;
   return name;
+}
+
+function formatTime(ts) {
+  if (!ts) return "";
+  const d = new Date(ts * 1000);
+  const now = new Date();
+  const isToday = d.toDateString() === now.toDateString();
+  if (isToday) {
+    return d.toTimeString().slice(0, 5);
+  }
+  return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
 function SourceTag({ name }) {
@@ -44,6 +57,11 @@ function Message({ msg }) {
             {[...new Set(msg.sources.map(formatSource))].filter(Boolean).map((s, i) => (
               <SourceTag key={i} name={s} />
             ))}
+            {msg.confidence != null && (
+              <span className="source-tag confidence-tag">
+                置信度 {(msg.confidence * 100).toFixed(0)}%
+              </span>
+            )}
           </div>
         )}
         {msg.route && (
@@ -81,90 +99,82 @@ function TypingIndicator() {
   );
 }
 
-function UploadPanel({ onClose }) {
-  const [file, setFile] = useState(null);
-  const [status, setStatus] = useState(null);
-  const [uploading, setUploading] = useState(false);
-  const inputRef = useRef();
-
-  const handleDrop = (e) => {
-    e.preventDefault();
-    const f = e.dataTransfer.files[0];
-    if (f) setFile(f);
-  };
-
-  const handleUpload = async () => {
-    if (!file) return;
-    setUploading(true);
-    setStatus(null);
-    const form = new FormData();
-    form.append("file", file);
-    try {
-      const res = await fetch(`${API_BASE}/documents/upload`, { method: "POST", body: form });
-      const data = await res.json();
-      if (res.ok) {
-        setStatus({ ok: true, msg: `「${file.name}」已成功加入知识库` });
-        setFile(null);
-      } else {
-        setStatus({ ok: false, msg: data.detail || "上传失败，请重试" });
-      }
-    } catch {
-      setStatus({ ok: false, msg: "网络错误，请检查服务是否运行" });
-    } finally {
-      setUploading(false);
-    }
-  };
-
+function ConversationItem({ conv, active, onClick, onDelete }) {
   return (
-    <div className="upload-panel">
-      <div className="upload-header">
-        <span>上传文档</span>
-        <button className="icon-btn" onClick={onClose}>
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-            <path d="M1 1l12 12M13 1L1 13" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-          </svg>
-        </button>
+    <div
+      className={`conv-item ${active ? "active" : ""}`}
+      onClick={onClick}
+    >
+      <div className="conv-icon">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+          <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2v10z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
       </div>
-      <div
-        className={`drop-zone ${file ? "has-file" : ""}`}
-        onDrop={handleDrop}
-        onDragOver={e => e.preventDefault()}
-        onClick={() => inputRef.current.click()}
+      <div className="conv-info">
+        <div className="conv-title">{conv.title}</div>
+        <div className="conv-meta">
+          {conv.message_count} 条消息 · {formatTime(conv.updated_at)}
+        </div>
+      </div>
+      <button
+        className="conv-delete"
+        onClick={(e) => { e.stopPropagation(); onDelete(); }}
+        title="删除对话"
       >
-        <input ref={inputRef} type="file" accept=".pdf,.docx,.doc" hidden onChange={e => setFile(e.target.files[0])} />
-        {file ? (
-          <div className="file-selected">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" stroke="#6366f1" strokeWidth="1.8"/>
-              <path d="M14 2v6h6" stroke="#6366f1" strokeWidth="1.8"/>
-            </svg>
-            <span>{file.name}</span>
-            <small>{(file.size / 1024).toFixed(0)} KB</small>
-          </div>
-        ) : (
-          <div className="drop-hint">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
-              <path d="M12 15V3m0 0L8 7m4-4l4 4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
-              <path d="M3 15v4a2 2 0 002 2h14a2 2 0 002-2v-4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
-            </svg>
-            <p>拖拽文件至此，或点击选择</p>
-            <small>支持 PDF、Word 文档</small>
-          </div>
-        )}
-        {msg.route && (
-          <div className="sources">
-            <span className="sources-label">{msg.sourceType || "Agent"}</span>
-            <span className="source-tag">{msg.route}</span>
-          </div>
-        )}
-      </div>
-      {status && (
-        <div className={`upload-status ${status.ok ? "ok" : "fail"}`}>{status.msg}</div>
-      )}
-      <button className="upload-btn" onClick={handleUpload} disabled={!file || uploading}>
-        {uploading ? "处理中…" : "加入知识库"}
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
+          <path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
       </button>
     </div>
+  );
+}
+
+function Sidebar({ conversations, activeId, onSelect, onCreate, onDelete, indexStatus }) {
+  return (
+    <aside className="sidebar">
+      <div className="sidebar-header">
+        <div className="brand-small">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+            <path d="M12 2L2 7l10 5 10-5-10-5z" stroke="#6366f1" strokeWidth="1.8" strokeLinejoin="round"/>
+            <path d="M2 17l10 5 10-5" stroke="#6366f1" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M2 12l10 5 10-5" stroke="#6366f1" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          <span>知识库 Agent</span>
+        </div>
+      </div>
+
+      <button className="new-chat-btn" onClick={onCreate}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+          <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+        </svg>
+        新建对话
+      </button>
+
+      <div className="conv-list">
+        <div className="conv-list-label">历史对话</div>
+        {conversations.length === 0 && (
+          <div className="conv-empty">暂无对话</div>
+        )}
+        {conversations.map((c) => (
+          <ConversationItem
+            key={c.id}
+            conv={c}
+            active={c.id === activeId}
+            onClick={() => onSelect(c.id)}
+            onDelete={() => onDelete(c.id)}
+          />
+        ))}
+      </div>
+
+      <div className="sidebar-footer">
+        {indexStatus && (
+          <div className="index-status-sidebar">
+            <span className={`dot ${indexStatus.total_chunks > 0 ? "active" : "empty"}`} />
+            知识库 · {indexStatus.total_chunks ?? 0} 片段
+          </div>
+        )}
+      </div>
+    </aside>
   );
 }
 
@@ -173,12 +183,14 @@ function IndexStatus({ status }) {
   return (
     <div className="index-status">
       <span className={`dot ${status.total_chunks > 0 ? "active" : "empty"}`} />
-      知识库 · {status.total_chunks ?? 0} 个片段 · {status.document_count ?? 0} 份文档
+      知识库 · {status.total_chunks ?? 0} 个片段
     </div>
   );
 }
 
 export default function App() {
+  const [conversations, setConversations] = useState([]);
+  const [activeConvId, setActiveConvId] = useState(null);
   const [messages, setMessages] = useState([
     { role: "assistant", content: "你好！我是你的知识库 Agent。知识库已经配置完成，请直接向我提问。" }
   ]);
@@ -189,6 +201,34 @@ export default function App() {
   const bottomRef = useRef();
   const inputRef = useRef();
 
+  // 拉取会话列表
+  const fetchConversations = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/conversations`);
+      if (res.ok) {
+        const data = await res.json();
+        setConversations(data);
+      }
+    } catch {}
+  };
+
+  // 拉取会话详情
+  const fetchConversation = async (id) => {
+    try {
+      const res = await fetch(`${API_BASE}/conversations/${id}`);
+      if (res.ok) {
+        const data = await res.json();
+        setMessages(data.messages.map(m => ({
+          role: m.role,
+          content: m.content,
+          sources: m.sources,
+          sourceType: m.source_type,
+          route: m.route,
+        })));
+      }
+    } catch {}
+  };
+
   const fetchStatus = async () => {
     try {
       const res = await fetch(`${API_BASE}/index/status`);
@@ -198,6 +238,7 @@ export default function App() {
 
   useEffect(() => {
     fetchStatus();
+    fetchConversations();
     const t = setInterval(fetchStatus, 30000);
     return () => clearInterval(t);
   }, []);
@@ -206,14 +247,73 @@ export default function App() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
+  // 新建对话
+  const createConversation = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/conversations`, { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        setActiveConvId(data.id);
+        setMessages([
+          { role: "assistant", content: "你好！我是你的知识库 Agent。请直接向我提问。" }
+        ]);
+        await fetchConversations();
+        inputRef.current?.focus();
+      }
+    } catch {}
+  };
+
+  // 切换对话
+  const selectConversation = async (id) => {
+    if (id === activeConvId) return;
+    setActiveConvId(id);
+    await fetchConversation(id);
+  };
+
+  // 删除对话
+  const deleteConversation = async (id) => {
+    try {
+      const res = await fetch(`${API_BASE}/conversations/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        if (id === activeConvId) {
+          setActiveConvId(null);
+          setMessages([
+            { role: "assistant", content: "你好！我是你的知识库 Agent。请点击左侧「新建对话」开始提问。" }
+          ]);
+        }
+        await fetchConversations();
+      }
+    } catch {}
+  };
+
   const send = async () => {
     const q = input.trim();
     if (!q || loading) return;
     setInput("");
+
+    // 如果没有活跃会话，先创建一个
+    let convId = activeConvId;
+    if (!convId) {
+      try {
+        const res = await fetch(`${API_BASE}/conversations`, { method: "POST" });
+        if (res.ok) {
+          const data = await res.json();
+          convId = data.id;
+          setActiveConvId(data.id);
+          // 清空欢迎语
+          setMessages([]);
+        }
+      } catch {
+        setMessages(m => [...m, { role: "error", content: "创建会话失败，请检查服务" }]);
+        return;
+      }
+    }
+
     setMessages(m => [...m, { role: "user", content: q }]);
     setLoading(true);
+
     try {
-      const res = await fetch(`${API_BASE}/query`, {
+      const res = await fetch(`${API_BASE}/conversations/${convId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: q, top_k: topK })
@@ -225,8 +325,10 @@ export default function App() {
           content: data.answer,
           sources: data.sources || [],
           sourceType: data.source_type,
-          route: data.route
+          route: data.route,
+          confidence: data.retrieval_confidence
         }]);
+        await fetchConversations(); // 刷新列表（更新时间/标题）
       } else {
         setMessages(m => [...m, { role: "error", content: data.detail || "查询失败，请重试" }]);
       }
@@ -242,62 +344,69 @@ export default function App() {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   };
 
+  const currentConv = conversations.find(c => c.id === activeConvId);
+
   return (
-    <div className="app">
-      <header className="topbar">
-        <div className="brand">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-            <path d="M12 2L2 7l10 5 10-5-10-5z" stroke="#6366f1" strokeWidth="1.8" strokeLinejoin="round"/>
-            <path d="M2 17l10 5 10-5" stroke="#6366f1" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-            <path d="M2 12l10 5 10-5" stroke="#6366f1" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-          <span>企业知识库 Agent</span>
-        </div>
-        <div className="topbar-right">
-          <IndexStatus status={indexStatus} />
-        </div>
-      </header>
+    <div className="app-layout">
+      <Sidebar
+        conversations={conversations}
+        activeId={activeConvId}
+        onSelect={selectConversation}
+        onCreate={createConversation}
+        onDelete={deleteConversation}
+        indexStatus={indexStatus}
+      />
 
-
-      <main className="chat-area">
-        <div className="messages">
-          {messages.map((m, i) => <Message key={i} msg={m} />)}
-          {loading && <TypingIndicator />}
-          <div ref={bottomRef} />
-        </div>
-      </main>
-
-      <footer className="input-area">
-        <div className="input-row">
-          <div className="input-wrap">
-            <textarea
-              ref={inputRef}
-              className="chat-input"
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={handleKey}
-              placeholder="输入问题，按 Enter 发送…"
-              rows={1}
-              disabled={loading}
-            />
+      <div className="main-area">
+        <header className="topbar">
+          <div className="chat-title">
+            {currentConv ? currentConv.title : "欢迎使用"}
           </div>
-          <button className="send-btn" onClick={send} disabled={!input.trim() || loading}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-              <path d="M22 2L11 13" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-              <path d="M22 2L15 22l-4-9-9-4 20-7z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
-            </svg>
-          </button>
-        </div>
-        <div className="input-meta">
-          <label className="topk-label">
-            检索片段数
-            <select value={topK} onChange={e => setTopK(Number(e.target.value))}>
-              {[3,5,8,10].map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </label>
-          <span className="hint">Shift+Enter 换行</span>
-        </div>
-      </footer>
+          <div className="topbar-right">
+            <IndexStatus status={indexStatus} />
+          </div>
+        </header>
+
+        <main className="chat-area">
+          <div className="messages">
+            {messages.map((m, i) => <Message key={i} msg={m} />)}
+            {loading && <TypingIndicator />}
+            <div ref={bottomRef} />
+          </div>
+        </main>
+
+        <footer className="input-area">
+          <div className="input-row">
+            <div className="input-wrap">
+              <textarea
+                ref={inputRef}
+                className="chat-input"
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={handleKey}
+                placeholder="输入问题，按 Enter 发送…"
+                rows={1}
+                disabled={loading}
+              />
+            </div>
+            <button className="send-btn" onClick={send} disabled={!input.trim() || loading}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <path d="M22 2L11 13" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                <path d="M22 2L15 22l-4-9-9-4 20-7z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
+              </svg>
+            </button>
+          </div>
+          <div className="input-meta">
+            <label className="topk-label">
+              检索片段数
+              <select value={topK} onChange={e => setTopK(Number(e.target.value))}>
+                {[3,5,8,10].map(n => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </label>
+            <span className="hint">Shift+Enter 换行</span>
+          </div>
+        </footer>
+      </div>
     </div>
   );
 }

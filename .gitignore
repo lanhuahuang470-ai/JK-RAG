@@ -1,4 +1,7 @@
 .env
+.env.*
+!.env.example
+.mcp.json
 __pycache__/
 *.py[cod]
 *.egg-info/

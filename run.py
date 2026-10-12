@@ -25,12 +25,9 @@ def cmd_index(args: argparse.Namespace) -> None:
     from config.settings import settings
     settings.validate_api_key()
 
-    from src.document_processor import get_processor
-    from src.embeddings import DashScopeEmbeddings
-    from src.vectorstore import FAISSVectorStore
+    from src.rag import DocumentProcessor, DashScopeEmbeddings, FAISSVectorStore
 
-    # 根据 .env 里的 CHUNK_STRATEGY 自动选择切分策略
-    processor = get_processor(getattr(args, "strategy", None))
+    processor = DocumentProcessor()
     embeddings = DashScopeEmbeddings()
     vs = FAISSVectorStore(embeddings=embeddings)
 
@@ -90,10 +87,8 @@ def cmd_query(args: argparse.Namespace) -> None:
     from config.settings import settings
     settings.validate_api_key()
 
-    from src.chain import RAGChain
-    from src.embeddings import DashScopeEmbeddings
     from src.llm import QwenLLM
-    from src.vectorstore import FAISSVectorStore
+    from src.rag import RAGChain, DashScopeEmbeddings, FAISSVectorStore
 
     embeddings = DashScopeEmbeddings()
     vs = FAISSVectorStore(embeddings=embeddings)
@@ -105,27 +100,6 @@ def cmd_query(args: argparse.Namespace) -> None:
     # --rewrite 命令行开关：指定则覆盖配置
     enable_rewrite = True if getattr(args, "rewrite", False) else None
     chain = RAGChain(vector_store=vs, llm=llm, enable_query_rewrite=enable_rewrite)
-
-    # ── 网络兜底分支：--web 或配置开启时，走 FallbackAgent ──────────────────
-    use_web = getattr(args, "web", False) or settings.enable_web_fallback
-    if use_web:
-        from src.agent import FallbackAgent
-        from src.agent.tools.rag_tool import RAGTool
-
-        agent = FallbackAgent(
-            rag_tool=RAGTool(rag_chain=chain),
-            llm=llm,
-            enable_web_fallback=True,
-        )
-        ares = agent.query(args.question)
-        print("\n" + "=" * 60)
-        print(f"❓ 问题：{args.question}")
-        print(f"💡 回答：\n{ares['answer']}")
-        print(f"📄 来源：{', '.join(ares.get('sources', [])) or '无'}")
-        print(f"🧭 决策路径：{ares.get('route', '')}")
-        print(f"📍 答案来源类型：{ares.get('source_type', '')}")
-        print("=" * 60)
-        return
 
     result = chain.query(args.question)
 
@@ -174,12 +148,6 @@ def main() -> None:
     index_parser.add_argument("--files", nargs="+", help="文件路径列表（可指定多个）")
     index_parser.add_argument("--dir", help="文件夹路径，自动扫描其中所有 PDF/Word 文档")
     index_parser.add_argument(
-        "--strategy",
-        choices=["recursive", "semantic", "hierarchical"],
-        default=None,
-        help="切分策略（不填则用 .env 里的 CHUNK_STRATEGY）",
-    )
-    index_parser.add_argument(
         "--rebuild", action="store_true", help="全量重建索引（默认为增量更新）"
     )
 
@@ -189,10 +157,6 @@ def main() -> None:
     query_parser.add_argument(
         "--rewrite", action="store_true",
         help="启用查询改写（检索前用 LLM 优化问题）",
-    )
-    query_parser.add_argument(
-        "--web", action="store_true",
-        help="启用网络兜底（RAG 检索不足时转 Tavily 网络搜索）",
     )
 
     # serve 子命令
